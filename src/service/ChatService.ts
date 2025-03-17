@@ -1,5 +1,6 @@
+import { FilterLM } from './../models/ChatCompletion';
 import {modelDetails, OpenAIModel} from "../models/model";
-import {ChatCompletion, ChatCompletionMessage, ChatCompletionRequest, ChatMessage, ChatMessagePart, Role} from "../models/ChatCompletion";
+import {ChatCompletion, ChatCompletionMessage, ChatCompletionRequest, ChatMessage, ChatMessagePart, LmChatRequest,ChatLMResponse, Role} from "../models/ChatCompletion";
 import {OPENAI_API_KEY} from "../config";
 import {CustomError} from "./CustomError";
 import {CHAT_COMPLETIONS_ENDPOINT, MODELS_ENDPOINT} from "../constants/apiEndpoints";
@@ -13,7 +14,15 @@ interface CompletionChunk {
   object: string;
   created: number;
   model: string;
-  choices: CompletionChunkChoice[];
+  choices: CompletionChunkChoiceLM[];
+}
+
+interface CompletionChunkChoiceLM {
+  index: number;
+  message: {
+    content: string;
+  };
+  finish_reason: null | string; // If there can be other values than 'null', use appropriate type instead of string.
 }
 
 interface CompletionChunkChoice {
@@ -61,6 +70,24 @@ export class ChatService {
       };
     });
   }
+  static async mapChatMessagesToForLMStudio(modelId: string, messages: ChatMessage[]): Promise<LmChatRequest> {
+    const model = await this.getModelById(modelId); // Retrieve the model details
+    if (!model) {
+      throw new Error(`Model with ID '${modelId}' not found`);
+    }
+    const lmChatRequest: LmChatRequest = {
+      // Lấy role == 'user' và content vị trí đầu tiên
+      message: messages.map((message) => {
+        return message.role === 'user' ? message.content : '';
+      }).join(' '),
+      filters: {
+        source: 'csv'
+      },
+      top_k: 3,
+      alpha: 0.4
+    };
+    return lmChatRequest;
+  }
 
 
   static async sendMessage(messages: ChatMessage[], modelId: string): Promise<ChatCompletion> {
@@ -69,15 +96,13 @@ export class ChatService {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${OPENAI_API_KEY}`
     };
+    
+    //const mappedMessages = await ChatService.mapChatMessagesToForLMStudio(modelId,messages);
 
-    const mappedMessages = await ChatService.mapChatMessagesToCompletionMessages(modelId,messages);
-
-    const requestBody: ChatCompletionRequest = {
-      model: modelId,
-      messages: mappedMessages,
-    };
+    const requestBody = await ChatService.mapChatMessagesToForLMStudio(modelId,messages); 
+    console.log('Request Body:', requestBody);
     const response = await fetch(endpoint, {
-      method: "POST",
+      method: "POST", 
       headers: headers,
       body: JSON.stringify(requestBody),
     });
@@ -122,7 +147,8 @@ export class ChatService {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${OPENAI_API_KEY}`
     };
-
+    chatSettings.model = 'deepseek-r1-distill-llama-8b';
+    //console.log('model 456:', chatSettings.model);
     const requestBody: ChatCompletionRequest = {
       model: DEFAULT_MODEL,
       messages: [],
@@ -137,15 +163,16 @@ export class ChatService {
       requestBody.seed = seed ?? requestBody.seed;
     }
 
-    const mappedMessages = await ChatService.mapChatMessagesToCompletionMessages(requestBody.model,messages);
-    requestBody.messages = mappedMessages;
-
+    //const mappedMessages = await ChatService.mapChatMessagesToCompletionMessages(requestBody.model,messages);
+    //requestBody.messages = mappedMessages;
+    var data = await ChatService.mapChatMessagesToForLMStudio(requestBody.model, messages);
     let response: Response;
     try {
       response = await fetch(endpoint, {
         method: "POST",
         headers: headers,
-        body: JSON.stringify(requestBody),
+        //body: JSON.stringify(requestBody),
+        body: JSON.stringify(data),
         signal: this.abortController.signal
       });
     } catch (error) {
@@ -172,7 +199,9 @@ export class ChatService {
 
     if (response.body) {
       // Read the response as a stream of data
+      console.log('response.body:', response.body);
       const reader = response.body.getReader();
+      console.log('reader:', reader);
       const decoder = new TextDecoder("utf-8");
 
       let partialDecodedChunk = undefined;
@@ -216,8 +245,8 @@ export class ChatService {
           let accumulatedContet = '';
           chunks.forEach(chunk => {
             chunk.choices.forEach(choice => {
-              if (choice.delta && choice.delta.content) {  // Check if delta and content exist
-                const content = choice.delta.content;
+              if (choice.message && choice.message.content) {  // Check if delta and content exist
+                const content = choice.message.content;
                 try {
                   accumulatedContet += content;
                 } catch (err) {
@@ -232,6 +261,155 @@ export class ChatService {
             });
           });
           debouncedCallback(accumulatedContet);
+
+          if (DONE) {
+            return;
+          }
+        }
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') {
+          // User aborted the stream, so no need to propagate an error.
+        } else if (error instanceof Error) {
+          NotificationService.handleUnexpectedError(error, 'Error reading streamed response.');
+        } else {
+          console.error('An unexpected error occurred');
+        }
+        return;
+      }
+    }
+  }
+  
+  
+  static processChatResponse(response: string): string {
+    // Example processing: remove <think> tags and trim whitespace
+    const processedResponse = response.replace(/<think>\n\n<\/think>\n\n/, '').trim();
+    return processedResponse;
+  }
+  
+  static async sendMessageStreamedGPT(chatSettings: ChatSettings, messages: ChatMessage[], callback: (content: string,fileDataRef: FileDataRef[]) => void): Promise<any> {
+    const debouncedCallback = this.debounceCallback(callback);
+    this.abortController = new AbortController();
+    let endpoint = CHAT_COMPLETIONS_ENDPOINT;
+    let headers = {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${OPENAI_API_KEY}`
+    };
+    chatSettings.model = 'deepseek-r1-distill-llama-8b';
+    //console.log('model 456:', chatSettings.model);
+    const requestBody: ChatCompletionRequest = {
+      model: DEFAULT_MODEL,
+      messages: [],
+      stream: true,
+    };
+
+    if (chatSettings) {
+      const {model, temperature, top_p, seed} = chatSettings;
+      requestBody.model = model ?? requestBody.model;
+      requestBody.temperature = temperature ?? requestBody.temperature;
+      requestBody.top_p = top_p ?? requestBody.top_p;
+      requestBody.seed = seed ?? requestBody.seed;
+    }
+
+    //const mappedMessages = await ChatService.mapChatMessagesToCompletionMessages(requestBody.model,messages);
+    //requestBody.messages = mappedMessages;
+    var data = await ChatService.mapChatMessagesToForLMStudio(requestBody.model, messages);
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers: headers,
+        //body: JSON.stringify(requestBody),
+        body: JSON.stringify(data),
+        signal: this.abortController.signal
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        NotificationService.handleUnexpectedError(error, 'Stream reading was aborted.');
+      } else if (error instanceof Error) {
+        NotificationService.handleUnexpectedError(error, 'Error reading streamed response.');
+      } else {
+        console.error('An unexpected error occurred');
+      }
+      return;
+    }
+
+    if (!response.ok) {
+      const err = await response.json();
+      throw new CustomError(err.error.message, err);
+    }
+
+    if (this.abortController.signal.aborted) {
+      // todo: propagate to ui?
+      console.log('Stream aborted');
+      return; // Early return if the fetch was aborted
+    }
+
+    if (response.body) {
+      console.log('response.body:', response.body);
+      // Read the response as a stream of data
+      const reader = response.body.getReader();
+      console.log('reader:', reader);
+      const decoder = new TextDecoder("utf-8");
+
+      let partialDecodedChunk = undefined;
+      try {
+        while (true) {
+          const streamChunk = await reader.read();
+          const {done, value} = streamChunk;
+          if (done) {
+            break;
+          }
+          let DONE = false;
+          let decodedChunk = decoder.decode(value);
+          console.log('decodedChunk:', decodedChunk);
+          if (partialDecodedChunk) {
+            decodedChunk = "data: " + partialDecodedChunk + decodedChunk;
+            partialDecodedChunk = undefined;
+          }
+          const rawData = decodedChunk.split("data: ").filter(Boolean);  // Split on "data: " and remove any empty strings
+          const chunks: CompletionChunk[] = rawData.map((chunk, index) => {
+            partialDecodedChunk = undefined;
+            chunk = chunk.trim();
+            if (chunk.length == 0) {
+              return;
+            }
+            if (chunk === '[DONE]') {
+              DONE = true;
+              return;
+            }
+            let o;
+            try {
+              o = JSON.parse(chunk);
+            } catch (err) {
+              if (index === rawData.length - 1) { // Check if this is the last element
+                partialDecodedChunk = chunk;
+              } else if (err instanceof Error) {
+                console.error(err.message);
+              }
+            }
+            return o;
+          }).filter(Boolean); // Filter out undefined values which may be a result of the [DONE] term check
+
+          let accumulatedContent = '';
+          chunks.forEach(chunk => {
+            chunk.choices.forEach(choice => {
+              if (choice.message && choice.message.content) {  // Check if message and content exist
+                const content = choice.message.content;
+                try {
+                  accumulatedContent += content;
+                  console.log('accumulatedContent:', accumulatedContent);
+                } catch (err) {
+                  if (err instanceof Error) {
+                    console.error(err.message);
+                  }
+                  console.log('error in client. continuing...')
+                }
+              } else if (choice?.finish_reason === 'stop') {
+                // done
+              }
+            });
+          });
+          debouncedCallback(accumulatedContent);
 
           if (DONE) {
             return;
@@ -297,47 +475,79 @@ export class ChatService {
     if (this.models !== null) {
       return Promise.resolve(this.models);
     }
-    this.models = fetch(MODELS_ENDPOINT, {
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+    console.log('Fetching models from OpenAI API...');
+    console.log('API Key:', OPENAI_API_KEY);
+    console.log('Models endpoint:', MODELS_ENDPOINT);
+    // Fetch models from OpenAI API
+    // Note: The endpoint is assumed to be a placeholder and should be replaced with the actual endpoint.
+    // const modelsEndpoint = `${OPENAI_ENDPOINT}/v1/models`;
+    // return fake model
+  return this.models = Promise.resolve([
+      {
+        id: 'deepseek-r1-distill-llama-8b',
+        object: 'model',
+        owned_by: 'organization_owner',
+        permission: [],
+        context_window: 4096,
+        knowledge_cutoff: '2021-09',
+        image_support: false,
+        preferred: false,
+        deprecated: false,
       },
-    })
-        .then(response => {
-          if (!response.ok) {
-            return response.json().then(err => {
-              throw new Error(err.error.message);
-            });
-          }
-          return response.json();
-        })
-        .catch(err => {
-          throw new Error(err.message || err);
-        })
-        .then(data => {
-          const models: OpenAIModel[] = data.data;
-          // Filter, enrich with contextWindow from the imported constant, and sort
-          return models
-              .filter(model => model.id.startsWith("gpt-"))
-              .map(model => {
-                const details = modelDetails[model.id] || {
-                  contextWindowSize: 0,
-                  knowledgeCutoffDate: '',
-                  imageSupport: false,
-                  preferred: false,
-                  deprecated: false,
-                };
-                return {
-                  ...model,
-                  context_window: details.contextWindowSize,
-                  knowledge_cutoff: details.knowledgeCutoffDate,
-                  image_support: details.imageSupport,
-                  preferred: details.preferred,
-                  deprecated: details.deprecated,
-                };
-              })
-              .sort((a, b) => b.id.localeCompare(a.id));
-        });
-    return this.models;
+      {
+        id: 'deepseek-coder-v2-lite-instruct-i1',
+        object: 'model',
+        owned_by: 'organization_owner',
+        permission: [],
+        context_window: 8192,
+        knowledge_cutoff: '2021-09',
+        image_support: false,
+        preferred: false,
+        deprecated: false,
+      }
+    ]);
+    // Uncomment the following lines to fetch from the actual OpenAI API
+    // this.models = fetch(MODELS_ENDPOINT, {
+    //   headers: {
+    //     'Authorization': `Bearer ${OPENAI_API_KEY}`,
+    //   },
+    // })
+    //     .then(response => {
+    //       if (!response.ok) {
+    //         return response.json().then(err => {
+    //           throw new Error(err.error.message);
+    //         });
+    //       }
+    //       return response.json();
+    //     })
+    //     .catch(err => {
+    //       throw new Error(err.message || err);
+    //     })
+    //     .then(data => {
+    //       const models: OpenAIModel[] = data.data;
+    //       // Filter, enrich with contextWindow from the imported constant, and sort
+    //       return models
+    //           .filter(model => model.id.startsWith("gpt-"))
+    //           .map(model => {
+    //             const details = modelDetails[model.id] || {
+    //               contextWindowSize: 0,
+    //               knowledgeCutoffDate: '',
+    //               imageSupport: false,
+    //               preferred: false,
+    //               deprecated: false,
+    //             };
+    //             return {
+    //               ...model,
+    //               context_window: details.contextWindowSize,
+    //               knowledge_cutoff: details.knowledgeCutoffDate,
+    //               image_support: details.imageSupport,
+    //               preferred: details.preferred,
+    //               deprecated: details.deprecated,
+    //             };
+    //           })
+    //           .sort((a, b) => b.id.localeCompare(a.id));
+    //     });
+    //return this.models;
   };
 }
 

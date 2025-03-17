@@ -19,6 +19,22 @@ export interface ChatCompletionMessage {
   role: Role,
   content: ChatMessagePart[];
 }
+export interface LmChatRequest {
+  message: string;
+  filters: {
+    source: string|'csv';
+  };
+  top_k: number|3;
+  alpha: number|0.4;
+}
+export interface ChatLMResponse {
+  response: string;
+  contexts: any[];
+}
+
+export interface FilterLM {
+  source: string | 'csv';
+}
 
 export interface ChatCompletionRequest {
   messages: ChatCompletionMessage[];
@@ -47,6 +63,7 @@ export interface ChatCompletionRequest {
   } | null;
   user?: string;
 }
+
 
 export interface ChatCompletion {
   id: string;

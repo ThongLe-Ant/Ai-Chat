@@ -583,7 +583,7 @@ const MainPage: React.FC<MainPageProps> = ({className, isSidebarCollapsed, toggl
           ) : null}
 
           {/* Add "Export/Import" buttons if we have a conversation or whenever you like */}
-          <div className="absolute top-2 right-2 z-50 flex gap-2">
+          {/* <div className="absolute top-2 right-2 z-50 flex gap-2">
             <button
               onClick={handleImportConversation}
               className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
@@ -598,7 +598,7 @@ const MainPage: React.FC<MainPageProps> = ({className, isSidebarCollapsed, toggl
                 {t('Export Chat')}
               </button>
             )}
-          </div>
+          </div> */}
 
           {!conversation && chatSettings ? (
             <CustomChatSplash className=" -translate-y-[10%] " chatSettings={chatSettings} />
